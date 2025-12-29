@@ -43,6 +43,78 @@
         }
         .blue { color: #3fb8ff; }
         .yellow { color: #ffd166; text-align: right; }
+
+        /* Touch controls */
+        #touchControls {
+            display: none;
+            width: 900px;
+            justify-content: space-between;
+            margin-top: 10px;
+        }
+        .player-controls {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+        }
+        .control-label {
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .lr-row {
+            display: flex;
+            gap: 10px;
+        }
+        .touch-btn {
+            width: 60px;
+            height: 60px;
+            font-size: 24px;
+            border: none;
+            border-radius: 10px;
+            background: #30363d;
+            color: #e6edf3;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+        }
+        .touch-btn:active, .touch-btn.pressed {
+            background: #4a5568;
+        }
+        .player-controls.left .touch-btn:active,
+        .player-controls.left .touch-btn.pressed {
+            background: #1c6a9e;
+        }
+        .player-controls.right .touch-btn:active,
+        .player-controls.right .touch-btn.pressed {
+            background: #c5932f;
+        }
+
+        /* Show touch controls on touch devices */
+        @media (pointer: coarse) {
+            #touchControls {
+                display: flex;
+            }
+        }
+
+        /* Mobile responsive */
+        @media (max-width: 920px) {
+            #gameCanvas {
+                width: 100vw;
+                height: auto;
+            }
+            .hud, #touchControls {
+                width: 100vw;
+                padding: 8px;
+            }
+            .touch-btn {
+                width: 50px;
+                height: 50px;
+                font-size: 20px;
+            }
+        }
+
         #resetBtn {
             margin-top: 10px;
             padding: 8px 20px;
@@ -60,6 +132,29 @@
 </head>
 <body>
     <canvas id="gameCanvas" width="900" height="600"></canvas>
+
+    <!-- Touch controls for mobile -->
+    <div id="touchControls">
+        <div class="player-controls left">
+            <div class="control-label blue">BLUE</div>
+            <button class="touch-btn up" data-car="0" data-action="up">▲</button>
+            <div class="lr-row">
+                <button class="touch-btn left" data-car="0" data-action="left">◀</button>
+                <button class="touch-btn right" data-car="0" data-action="right">▶</button>
+            </div>
+            <button class="touch-btn down" data-car="0" data-action="down">▼</button>
+        </div>
+        <div class="player-controls right">
+            <div class="control-label yellow">YELLOW</div>
+            <button class="touch-btn up" data-car="1" data-action="up">▲</button>
+            <div class="lr-row">
+                <button class="touch-btn left" data-car="1" data-action="left">◀</button>
+                <button class="touch-btn right" data-car="1" data-action="right">▶</button>
+            </div>
+            <button class="touch-btn down" data-car="1" data-action="down">▼</button>
+        </div>
+    </div>
+
     <div class="hud">
         <span id="blueHud" class="blue">Blue: Laps 0 | Lap 0.00s | Last --</span>
         <span class="controls-inline">WASD / Arrow Keys</span>
@@ -626,6 +721,59 @@
         });
 
         document.getElementById('resetBtn').addEventListener('click', resetRace);
+
+        // Touch controls for mobile
+        const touchButtons = document.querySelectorAll('.touch-btn');
+        const touchState = {
+            0: { up: false, down: false, left: false, right: false },
+            1: { up: false, down: false, left: false, right: false }
+        };
+
+        // Map touch actions to key codes
+        const touchToKey = {
+            0: { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD' },
+            1: { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight' }
+        };
+
+        function handleTouchStart(e) {
+            e.preventDefault();
+            const btn = e.currentTarget;
+            const carIdx = parseInt(btn.dataset.car);
+            const action = btn.dataset.action;
+
+            touchState[carIdx][action] = true;
+            keys.add(touchToKey[carIdx][action]);
+            btn.classList.add('pressed');
+        }
+
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            const btn = e.currentTarget;
+            const carIdx = parseInt(btn.dataset.car);
+            const action = btn.dataset.action;
+
+            touchState[carIdx][action] = false;
+            keys.delete(touchToKey[carIdx][action]);
+            btn.classList.remove('pressed');
+        }
+
+        touchButtons.forEach(btn => {
+            btn.addEventListener('touchstart', handleTouchStart, { passive: false });
+            btn.addEventListener('touchend', handleTouchEnd, { passive: false });
+            btn.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+
+            // Also support mouse for testing on desktop
+            btn.addEventListener('mousedown', handleTouchStart);
+            btn.addEventListener('mouseup', handleTouchEnd);
+            btn.addEventListener('mouseleave', handleTouchEnd);
+        });
+
+        // Prevent double-tap zoom on mobile
+        document.addEventListener('touchstart', function(e) {
+            if (e.touches.length > 1) {
+                e.preventDefault();
+            }
+        }, { passive: false });
 
         // Start the game
         gameLoop();
