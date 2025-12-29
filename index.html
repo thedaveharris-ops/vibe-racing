@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vibe Racing - Figure 8</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #1b1f24;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: Helvetica, Arial, sans-serif;
+        }
+        #gameCanvas {
+            border: 2px solid #30363d;
+            border-radius: 4px;
+        }
+        .hud {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 900px;
+            margin-top: 10px;
+            padding: 8px 15px;
+            background: #20252b;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .hud span {
+            flex: 1;
+        }
+        .controls-inline {
+            color: #9aa6b2;
+            text-align: center;
+        }
+        .blue { color: #3fb8ff; }
+        .yellow { color: #ffd166; text-align: right; }
+        #resetBtn {
+            margin-top: 10px;
+            padding: 8px 20px;
+            background: #30363d;
+            color: #e6edf3;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        #resetBtn:hover {
+            background: #3a4149;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="900" height="600"></canvas>
+    <div class="hud">
+        <span id="blueHud" class="blue">Blue: Laps 0 | Lap 0.00s | Last --</span>
+        <span class="controls-inline">WASD / Arrow Keys</span>
+        <span id="yellowHud" class="yellow">Yellow: Laps 0 | Lap 0.00s | Last --</span>
+    </div>
+    <button id="resetBtn">Reset Race</button>
+
+    <script>
+        // Constants
+        const WINDOW_W = 900;
+        const WINDOW_H = 600;
+        const TRACK_WIDTH = 90;
+        const LOOP_RADIUS = 170;
+        const LOOP_OFFSET = 160;
+        const CENTER_X = WINDOW_W / 2;
+        const CENTER_Y = WINDOW_H / 2;
+
+        // Track shape constants
+        const TRACK_SCALE_X = LOOP_OFFSET + LOOP_RADIUS * 0.7;
+        const TRACK_SCALE_Y = LOOP_RADIUS * 2.0;
+
+        // Finish line at bottom-right of track (t = π/4)
+        const FINISH_X = CENTER_X + TRACK_SCALE_X * 0.707;
+        const FINISH_Y = CENTER_Y + TRACK_SCALE_Y * 0.5;
+        const GRID_X = FINISH_X - 50;
+        const GRID_Y = FINISH_Y;
+
+        // Car constants
+        const CAR_LENGTH = 28;
+        const CAR_WIDTH = 14;
+        const CAR_SPEED = 550.0;  // Increased for better feel
+        const TURN_SPEED = 2.6;
+        const FRICTION = 0.95;
+        const COLLISION_DAMPING = 0.85;
+        const OFF_TRACK_FRICTION = 0.72;
+        const COUNTDOWN_SECONDS = 5;
+        const FLAG_SECONDS = 1.6;
+
+        // Colors
+        const ROAD_COLOR = '#2a2f36';
+        const EDGE_COLOR = '#3a4048';
+        const BG_COLOR = '#1b1f24';
+        const GRASS_COLOR = '#23402b';
+
+        // Game state
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const keys = new Set();
+        let lastTime = performance.now() / 1000;
+        let raceStartTime = lastTime;
+        let countdownStart = lastTime;
+        let raceActive = false;
+        let crowdTimer = 0;
+        let crowdPhase = 0;
+
+        const cars = [
+            {
+                gridDx: 0,
+                gridDy: -16,
+                x: GRID_X,
+                y: GRID_Y - 16,
+                prevX: GRID_X,
+                prevY: GRID_Y - 16,
+                angle: 0,
+                vel: 0,
+                laps: 0,
+                lastLapTime: lastTime,
+                lastLapDuration: null,
+                lapCooldown: 0,
+                seenRightSide: false,
+                lapReady: false,
+                onOverpass: true,
+                controls: { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD' },
+                fill: '#3fb8ff',
+                outline: '#102733',
+                wing: '#1c6a9e',
+                name: 'Blue'
+            },
+            {
+                gridDx: -26,
+                gridDy: 16,
+                x: GRID_X - 26,
+                y: GRID_Y + 16,
+                prevX: GRID_X - 26,
+                prevY: GRID_Y + 16,
+                angle: 0,
+                vel: 0,
+                laps: 0,
+                lastLapTime: lastTime,
+                lastLapDuration: null,
+                lapCooldown: 0,
+                seenRightSide: false,
+                lapReady: false,
+                onOverpass: true,
+                controls: { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight' },
+                fill: '#ffd166',
+                outline: '#3d2c0f',
+                wing: '#c5932f',
+                name: 'Yellow'
+            }
+        ];
+
+        // Track helper functions
+        function lemniscatePoint(t) {
+            return {
+                x: CENTER_X + TRACK_SCALE_X * Math.sin(t),
+                y: CENTER_Y + TRACK_SCALE_Y * Math.sin(t) * Math.cos(t)
+            };
+        }
+
+        function getTrackPoints(tStart, tEnd, numPoints = 80) {
+            const points = [];
+            for (let i = 0; i <= numPoints; i++) {
+                const t = tStart + (tEnd - tStart) * i / numPoints;
+                points.push(lemniscatePoint(t));
+            }
+            return points;
+        }
+
+        function drawTrackPath(points, color, width) {
+            if (points.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) {
+                ctx.lineTo(points[i].x, points[i].y);
+            }
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+        }
+
+        function drawDashedPath(points, color, width) {
+            if (points.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) {
+                ctx.lineTo(points[i].x, points[i].y);
+            }
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.lineCap = 'round';
+            ctx.setLineDash([15, 15]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawTrack() {
+            // Background
+            ctx.fillStyle = GRASS_COLOR;
+            ctx.fillRect(0, 0, WINDOW_W, WINDOW_H);
+
+            // Grandstands at top
+            ctx.fillStyle = '#20252b';
+            ctx.fillRect(0, 0, WINDOW_W, 58);
+
+            const standColor = '#3b434c';
+            const seatColor = '#4b5661';
+            for (let i = 0; i < 6; i++) {
+                const x0 = 40 + i * 140;
+                ctx.fillStyle = standColor;
+                ctx.fillRect(x0, 6, 90, 34);
+
+                // Seat rows
+                ctx.strokeStyle = seatColor;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x0 + 6, 16); ctx.lineTo(x0 + 84, 16);
+                ctx.moveTo(x0 + 8, 26); ctx.lineTo(x0 + 82, 26);
+                ctx.moveTo(x0 + 10, 36); ctx.lineTo(x0 + 80, 36);
+                ctx.stroke();
+
+                // Animated crowd
+                for (let r = 0; r < 3; r++) {
+                    for (let c = 0; c < 8; c++) {
+                        const cx = x0 + 10 + c * 10;
+                        const cy = 12 + r * 10;
+                        const idx = i * 24 + r * 8 + c;
+                        let color;
+                        if ((idx + crowdPhase) % 3 === 0) {
+                            color = '#f3a26b';
+                        } else if ((idx + crowdPhase) % 3 === 1) {
+                            color = '#7ad1ff';
+                        } else {
+                            color = '#e8e4b3';
+                        }
+                        ctx.fillStyle = color;
+                        ctx.fillRect(cx, cy, 4, 4);
+                    }
+                }
+            }
+
+            // Banners
+            for (let i = 0; i < 5; i++) {
+                const bx0 = 70 + i * 170;
+                ctx.fillStyle = '#d35f4d';
+                ctx.fillRect(bx0, 24, 80, 16);
+                ctx.fillStyle = '#1b1f24';
+                ctx.font = 'bold 9px Helvetica';
+                ctx.textAlign = 'center';
+                ctx.fillText('F1', bx0 + 40, 36);
+            }
+
+            // 1. Draw UNDERPASS path
+            const underpassPoints = getTrackPoints(5 * Math.PI / 4, 2 * Math.PI + 3 * Math.PI / 4);
+            drawTrackPath(underpassPoints, EDGE_COLOR, TRACK_WIDTH + 4);
+            drawTrackPath(underpassPoints, ROAD_COLOR, TRACK_WIDTH);
+
+            // 2. Shadow under overpass
+            const shadowPoints = [];
+            for (let t = Math.PI - 0.5; t <= Math.PI + 0.5; t += 0.25) {
+                const p = lemniscatePoint(t);
+                shadowPoints.push({ x: p.x + 6, y: p.y + 6 });
+            }
+            drawTrackPath(shadowPoints, '#0d0f12', TRACK_WIDTH + 10);
+
+            // 3. Draw OVERPASS path (no edge, just road surface)
+            const overpassPoints = getTrackPoints(3 * Math.PI / 4 - 0.3, 5 * Math.PI / 4 + 0.3);
+            drawTrackPath(overpassPoints, ROAD_COLOR, TRACK_WIDTH);
+
+            // 4. Center dashed lines
+            // Underpass part 1
+            drawDashedPath(getTrackPoints(5 * Math.PI / 4, 2 * Math.PI - 0.12, 50), '#ffffff', 2);
+            // Underpass part 2
+            drawDashedPath(getTrackPoints(0.12, 3 * Math.PI / 4, 50), '#ffffff', 2);
+            // Overpass dashed line
+            drawDashedPath(getTrackPoints(3 * Math.PI / 4 - 0.3, 5 * Math.PI / 4 + 0.3, 40), '#ffffff', 2);
+
+            // Finish line
+            const blockH = 10;
+            const finishY0 = FINISH_Y - TRACK_WIDTH / 2;
+            const finishY1 = FINISH_Y + TRACK_WIDTH / 2;
+            for (let i = 0, y = finishY0; y < finishY1; i++, y += blockH) {
+                ctx.fillStyle = i % 2 === 0 ? '#f2f2f2' : '#1b1f24';
+                ctx.fillRect(FINISH_X - 6, y, 12, Math.min(blockH, finishY1 - y));
+            }
+
+            // Starting grid
+            ctx.strokeStyle = '#5f6b75';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 2; i++) {
+                const gx = GRID_X - i * 26;
+                const gy = GRID_Y - 24 + i * 32;
+                ctx.strokeRect(gx - 14, gy - 9, 28, 18);
+            }
+        }
+
+        function drawCar(car, visible = true) {
+            if (!visible) return;
+
+            const halfL = CAR_LENGTH / 2;
+            const halfW = CAR_WIDTH / 2;
+
+            ctx.save();
+            ctx.translate(car.x, car.y);
+            ctx.rotate(car.angle);
+
+            // Body
+            ctx.beginPath();
+            ctx.moveTo(-halfL * 0.8, -halfW * 0.6);
+            ctx.lineTo(halfL * 0.2, -halfW * 0.45);
+            ctx.lineTo(halfL * 0.6, -halfW * 0.25);
+            ctx.lineTo(halfL * 0.85, 0);
+            ctx.lineTo(halfL * 0.6, halfW * 0.25);
+            ctx.lineTo(halfL * 0.2, halfW * 0.45);
+            ctx.lineTo(-halfL * 0.8, halfW * 0.6);
+            ctx.lineTo(-halfL, halfW * 0.4);
+            ctx.lineTo(-halfL, -halfW * 0.4);
+            ctx.closePath();
+            ctx.fillStyle = car.fill;
+            ctx.strokeStyle = car.outline;
+            ctx.lineWidth = 2;
+            ctx.fill();
+            ctx.stroke();
+
+            // Nose
+            ctx.beginPath();
+            ctx.moveTo(halfL * 0.6, -halfW * 0.22);
+            ctx.lineTo(halfL * 1.15, 0);
+            ctx.lineTo(halfL * 0.6, halfW * 0.22);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            // Rear wing
+            ctx.fillStyle = car.wing;
+            ctx.fillRect(-halfL * 1.2, -halfW * 0.8, halfL * 0.5, halfW * 1.6);
+            ctx.strokeRect(-halfL * 1.2, -halfW * 0.8, halfL * 0.5, halfW * 1.6);
+
+            // Front wing
+            ctx.fillRect(halfL * 0.9, -halfW * 0.65, halfL * 0.35, halfW * 1.3);
+            ctx.strokeRect(halfL * 0.9, -halfW * 0.65, halfL * 0.35, halfW * 1.3);
+
+            ctx.restore();
+        }
+
+        function isOnTrack(x, y) {
+            const halfW = TRACK_WIDTH / 2;
+            let minDist = Infinity;
+            for (let i = 0; i < 64; i++) {
+                const t = 2 * Math.PI * i / 64;
+                const p = lemniscatePoint(t);
+                const dist = Math.hypot(x - p.x, y - p.y);
+                minDist = Math.min(minDist, dist);
+            }
+            return minDist <= halfW;
+        }
+
+        function updateCarPath(car) {
+            const crossingRadius = TRACK_WIDTH * 1.5;
+            if (Math.abs(car.x - CENTER_X) < crossingRadius && Math.abs(car.y - CENTER_Y) < crossingRadius) {
+                return;
+            }
+            const inRight = car.x > CENTER_X;
+            const inTop = car.y < CENTER_Y;
+            car.onOverpass = (inRight && inTop) || (!inRight && !inTop);
+        }
+
+        function isNearCrossing(x, y) {
+            const crossingRadius = TRACK_WIDTH * 0.5;  // Smaller radius so car only hides right at the bridge
+            return Math.abs(x - CENTER_X) < crossingRadius && Math.abs(y - CENTER_Y) < crossingRadius;
+        }
+
+        function shouldHideCar(car) {
+            if (!isNearCrossing(car.x, car.y)) return false;
+            return !car.onOverpass;
+        }
+
+        function checkLap(car, now, dt) {
+            if (car.lapCooldown > 0) {
+                car.lapCooldown = Math.max(0, car.lapCooldown - dt);
+            }
+
+            const x0 = car.prevX;
+            const x1 = car.x;
+            if (x0 === x1) return;
+
+            if (car.x > FINISH_X + 8) {
+                car.seenRightSide = true;
+            }
+            if (car.x < FINISH_X - 8 && car.seenRightSide) {
+                car.lapReady = true;
+            }
+
+            const crossed = x0 < FINISH_X && x1 >= FINISH_X;
+            let inStrip = false;
+            if (crossed && x0 !== x1) {
+                const t = (FINISH_X - x0) / (x1 - x0);
+                const yAt = car.prevY + t * (car.y - car.prevY);
+                const finishY0 = FINISH_Y - TRACK_WIDTH / 2;
+                const finishY1 = FINISH_Y + TRACK_WIDTH / 2;
+                inStrip = yAt >= finishY0 && yAt <= finishY1;
+            }
+
+            if (crossed && inStrip && car.lapReady && car.lapCooldown <= 0) {
+                const lapTime = now - car.lastLapTime;
+                if (lapTime > 0.6) {
+                    car.laps++;
+                    car.lastLapDuration = lapTime;
+                    car.lastLapTime = now;
+                    car.lapCooldown = 1.2;
+                    car.seenRightSide = false;
+                    car.lapReady = false;
+                }
+            }
+        }
+
+        function resolveCollisions() {
+            if (cars.length < 2) return;
+            const carA = cars[0];
+            const carB = cars[1];
+
+            const dx = carB.x - carA.x;
+            const dy = carB.y - carA.y;
+            const dist = Math.hypot(dx, dy);
+            const minDist = CAR_LENGTH * 0.75;
+
+            if (dist === 0 || dist >= minDist) return;
+
+            const overlap = minDist - dist;
+            const nx = dx / dist;
+            const ny = dy / dist;
+
+            carA.x -= nx * overlap * 0.5;
+            carA.y -= ny * overlap * 0.5;
+            carB.x += nx * overlap * 0.5;
+            carB.y += ny * overlap * 0.5;
+
+            carA.vel *= -COLLISION_DAMPING;
+            carB.vel *= -COLLISION_DAMPING;
+
+            // Clamp to screen
+            carA.x = Math.max(CAR_WIDTH, Math.min(WINDOW_W - CAR_WIDTH, carA.x));
+            carA.y = Math.max(CAR_WIDTH, Math.min(WINDOW_H - CAR_WIDTH, carA.y));
+            carB.x = Math.max(CAR_WIDTH, Math.min(WINDOW_W - CAR_WIDTH, carB.x));
+            carB.y = Math.max(CAR_WIDTH, Math.min(WINDOW_H - CAR_WIDTH, carB.y));
+        }
+
+        function updateHUD(now) {
+            cars.forEach((car, idx) => {
+                const currentLap = !raceActive ? 0 : now - car.lastLapTime;
+                const lastText = car.lastLapDuration !== null ? car.lastLapDuration.toFixed(2) + 's' : '--';
+                const text = `${car.name}: Laps ${car.laps} | Lap ${currentLap.toFixed(2)}s | Last ${lastText}`;
+                const elementId = idx === 0 ? 'blueHud' : 'yellowHud';
+                document.getElementById(elementId).textContent = text;
+            });
+        }
+
+        function drawCountdown(now) {
+            const elapsed = now - countdownStart;
+            if (elapsed < COUNTDOWN_SECONDS) {
+                const count = COUNTDOWN_SECONDS - Math.floor(elapsed);
+                ctx.font = 'bold 72px Helvetica';
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText(count.toString(), WINDOW_W / 2, WINDOW_H / 2 + 25);
+            } else if (elapsed < COUNTDOWN_SECONDS + FLAG_SECONDS) {
+                // Draw waving checkered flag
+                drawCheckeredFlag(elapsed - COUNTDOWN_SECONDS);
+            }
+        }
+
+        function drawCheckeredFlag(phaseTime) {
+            const cx = WINDOW_W / 2;
+            const cy = WINDOW_H / 2;
+            const w = 120;
+            const h = 80;
+            const block = 20;
+            const phase = Math.floor(phaseTime * 6) % 2;
+
+            // Draw flag blocks
+            for (let r = 0; r < h; r += block) {
+                for (let c = 0; c < w; c += block) {
+                    const row = r / block;
+                    const col = c / block;
+                    // Alternate colors, with wave effect
+                    let isWhite = (row + col) % 2 === 0;
+                    // Wave animation
+                    if ((col + phase) % 2 === 0) {
+                        isWhite = !isWhite;
+                    }
+                    ctx.fillStyle = isWhite ? '#ffffff' : '#1b1f24';
+                    ctx.fillRect(cx - w/2 + c, cy - h/2 + r, block, block);
+                }
+            }
+
+            // Draw pole
+            ctx.strokeStyle = '#cfd4da';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(cx - w/2 - 10, cy - h/2);
+            ctx.lineTo(cx - w/2 - 10, cy + h/2);
+            ctx.stroke();
+        }
+
+        function resetRace() {
+            const now = performance.now() / 1000;
+            lastTime = now;
+            raceStartTime = now;
+            countdownStart = now;
+            raceActive = false;
+
+            cars.forEach(car => {
+                car.x = GRID_X + car.gridDx;
+                car.y = GRID_Y + car.gridDy;
+                car.prevX = car.x;
+                car.prevY = car.y;
+                car.angle = 0;
+                car.vel = 0;
+                car.laps = 0;
+                car.lastLapTime = now;
+                car.lastLapDuration = null;
+                car.lapCooldown = 0;
+                car.seenRightSide = false;
+                car.lapReady = false;
+                car.onOverpass = true;
+            });
+        }
+
+        function gameLoop() {
+            const now = performance.now() / 1000;
+            const dt = now - lastTime;
+            lastTime = now;
+
+            // Update countdown
+            const elapsed = now - countdownStart;
+            if (elapsed >= COUNTDOWN_SECONDS && !raceActive) {
+                raceActive = true;
+                cars.forEach(car => {
+                    car.lastLapTime = now;
+                    car.lastLapDuration = null;
+                    car.lapCooldown = 0;
+                    car.seenRightSide = false;
+                    car.lapReady = false;
+                });
+            }
+
+            // Update cars
+            cars.forEach(car => {
+                car.prevX = car.x;
+                car.prevY = car.y;
+
+                if (raceActive) {
+                    if (keys.has(car.controls.up)) car.vel += CAR_SPEED * dt;
+                    if (keys.has(car.controls.down)) car.vel -= CAR_SPEED * dt;
+                    if (keys.has(car.controls.left)) car.angle -= TURN_SPEED * dt;
+                    if (keys.has(car.controls.right)) car.angle += TURN_SPEED * dt;
+
+                    car.vel *= FRICTION;
+                    car.x += Math.cos(car.angle) * car.vel * dt;
+                    car.y += Math.sin(car.angle) * car.vel * dt;
+
+                    if (!isOnTrack(car.x, car.y)) {
+                        car.vel *= OFF_TRACK_FRICTION;
+                    }
+
+                    // Clamp to screen
+                    car.x = Math.max(CAR_WIDTH, Math.min(WINDOW_W - CAR_WIDTH, car.x));
+                    car.y = Math.max(CAR_WIDTH, Math.min(WINDOW_H - CAR_WIDTH, car.y));
+
+                    checkLap(car, now, dt);
+                } else {
+                    car.vel = 0;
+                }
+
+                updateCarPath(car);
+            });
+
+            resolveCollisions();
+
+            // Update crowd animation
+            crowdTimer += dt;
+            if (crowdTimer >= 0.25) {
+                crowdTimer = 0;
+                crowdPhase = (crowdPhase + 1) % 2;
+            }
+
+            // Draw everything
+            drawTrack();
+
+            // Draw cars (respecting overpass/underpass visibility)
+            cars.forEach(car => {
+                drawCar(car, !shouldHideCar(car));
+            });
+
+            updateHUD(now);
+            drawCountdown(now);
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Event listeners
+        document.addEventListener('keydown', e => {
+            keys.add(e.code);
+            // Prevent arrow keys from scrolling
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+                e.preventDefault();
+            }
+        });
+
+        document.addEventListener('keyup', e => {
+            keys.delete(e.code);
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', resetRace);
+
+        // Start the game
+        gameLoop();
+    </script>
+</body>
+</html>
